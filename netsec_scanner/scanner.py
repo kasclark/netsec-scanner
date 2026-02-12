@@ -152,12 +152,44 @@ class NetworkScanner:
             # Phase 3: Service checks
             if "checks" in self.modules and host.ports:
                 update(base_pct + 40, f"[{ip}] Running service checks...")
-                checked_funcs = set()
+                checked_ports = set()
                 for p in host.ports:
                     port_num = p.get("port", 0)
+                    svc_name = p.get("service", "").lower()
+
+                    # Determine check function by port, service name, or banner
                     check_fn = SERVICE_CHECKS.get(port_num)
-                    if check_fn and id(check_fn) not in checked_funcs:
-                        checked_funcs.add(id(check_fn))
+                    banner = p.get("version", "").lower()
+                    if not check_fn:
+                        # Try matching by service name
+                        if svc_name in ("ssh",) or "ssh" in banner:
+                            check_fn = check_ssh
+                        elif svc_name in ("http", "https", "http-proxy", "ssl/http", "ssl/https") or any(kw in banner for kw in ("nginx", "apache", "httpd", "cherrypy", "nzbget")):
+                            check_fn = check_http
+                        elif svc_name in ("netbios-ssn", "microsoft-ds") or "samba" in banner:
+                            check_fn = check_smb
+                        elif svc_name in ("ftp",) or "ftp" in banner:
+                            check_fn = check_ftp
+                        elif svc_name in ("telnet",):
+                            check_fn = check_telnet
+                        elif svc_name in ("domain", "dns"):
+                            check_fn = check_dns
+                        elif svc_name in ("snmp",):
+                            check_fn = check_snmp
+                        elif svc_name in ("smtp", "submission", "smtps") or "smtp" in banner:
+                            check_fn = check_smtp
+                        elif svc_name in ("mysql", "postgresql", "redis", "mongodb", "ms-sql-s"):
+                            check_fn = check_databases
+                        elif svc_name in ("ms-wbt-server", "rdp"):
+                            check_fn = check_rdp
+                        elif svc_name in ("upnp", "ssdp"):
+                            check_fn = check_upnp
+                        # For UPnP/HTTP-like ports, try HTTP check
+                        elif svc_name in ("upnp", "commplex-link", "intermapper", "ibm-db2-admin"):
+                            check_fn = check_http
+
+                    if check_fn and port_num not in checked_ports:
+                        checked_ports.add(port_num)
                         try:
                             findings = check_fn(ip, port_num, p)
                             host.findings.extend(findings)
