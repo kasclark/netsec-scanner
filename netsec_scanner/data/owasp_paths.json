@@ -1,0 +1,5 @@
+{
+  "admin_paths": ["/admin", "/administrator", "/manager", "/console", "/dashboard", "/wp-admin", "/phpmyadmin", "/adminer"],
+  "sensitive_files": ["/.env", "/.git/config", "/.htaccess", "/web.config", "/wp-config.php.bak", "/phpinfo.php", "/info.php", "/server-status", "/server-info", "/.DS_Store", "/crossdomain.xml"],
+  "api_paths": ["/api", "/swagger", "/swagger-ui.html", "/graphql", "/graphiql", "/api-docs", "/v1", "/v2"]
+}

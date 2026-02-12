@@ -6,7 +6,9 @@ import re
 import ssl
 import socket
 import datetime
+import uuid
 from typing import List
+from html.parser import HTMLParser
 
 import requests
 
@@ -133,6 +135,9 @@ def check_http(ip: str, port: int, port_info: dict) -> List[Finding]:
         except Exception:
             pass
 
+        # OWASP Top 10 passive checks
+        findings.extend(_check_owasp(ip, port, base_url, is_https, resp))
+
     except requests.exceptions.RequestException as e:
         findings.append(Finding(
             severity=Severity.INFO,
@@ -232,6 +237,303 @@ def _check_tls(ip: str, port: int) -> List[Finding]:
                 module="checks/http",
                 remediation="Use a certificate from a trusted Certificate Authority (e.g., Let's Encrypt).",
                 port=port, service="https",
+            ))
+    except Exception:
+        pass
+
+    return findings
+
+
+def _load_owasp_paths():
+    path = os.path.join(DATA_DIR, "owasp_paths.json")
+    with open(path) as f:
+        return json.load(f)
+
+
+class _ScriptSrcParser(HTMLParser):
+    """Extract external script src attributes and check for integrity."""
+    def __init__(self):
+        super().__init__()
+        self.scripts_missing_sri = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "script":
+            return
+        attrs_dict = dict(attrs)
+        src = attrs_dict.get("src", "")
+        if src and (src.startswith("http://") or src.startswith("https://") or src.startswith("//")):
+            if "integrity" not in attrs_dict:
+                self.scripts_missing_sri.append(src)
+
+
+def _check_owasp(ip: str, port: int, base_url: str, is_https: bool, initial_resp: requests.Response) -> List[Finding]:
+    """Run OWASP Top 10 passive/safe checks. Returns list of Findings."""
+    findings = []
+    hdrs = {"User-Agent": "netsec-scanner/1.0"}
+    req_kw = dict(timeout=10, verify=False, headers=hdrs, allow_redirects=True)
+    body = initial_resp.text[:10000]
+    resp_headers = initial_resp.headers
+    owasp = _load_owasp_paths()
+
+    # ── A01: Broken Access Control ──────────────────────────────────
+
+    # Directory listing
+    for path in ["/", "/icons/", "/images/"]:
+        try:
+            r = requests.get(base_url + path, **req_kw)
+            if r.status_code == 200 and "Index of" in r.text[:2000]:
+                findings.append(Finding(
+                    severity=Severity.MEDIUM,
+                    title=f"OWASP A01: Directory listing enabled ({path})",
+                    description=f"Directory listing is enabled at {path}, exposing file structure.",
+                    module="checks/http",
+                    remediation="Disable directory listing in the web server configuration.",
+                    port=port, service="http",
+                ))
+                break  # one finding is enough
+        except Exception:
+            pass
+
+    # CORS wildcard
+    try:
+        r = requests.get(base_url, timeout=10, verify=False,
+                         headers={**hdrs, "Origin": "https://evil.example.com"}, allow_redirects=True)
+        acao = r.headers.get("Access-Control-Allow-Origin", "")
+        if acao == "*":
+            findings.append(Finding(
+                severity=Severity.MEDIUM,
+                title="OWASP A01: CORS wildcard Access-Control-Allow-Origin",
+                description="Server returns Access-Control-Allow-Origin: * allowing any origin.",
+                module="checks/http",
+                remediation="Restrict CORS to trusted origins instead of using wildcard.",
+                port=port, service="http",
+            ))
+        elif acao == "https://evil.example.com":
+            findings.append(Finding(
+                severity=Severity.HIGH,
+                title="OWASP A01: CORS reflects arbitrary Origin",
+                description="Server reflects the Origin header in Access-Control-Allow-Origin, allowing any origin.",
+                module="checks/http",
+                remediation="Validate and whitelist allowed origins for CORS.",
+                port=port, service="http",
+            ))
+    except Exception:
+        pass
+
+    # Admin/API path exposure (batch — count toward ~20 request budget)
+    exposed_paths = []
+    all_paths = owasp.get("admin_paths", []) + owasp.get("api_paths", [])
+    for path in all_paths[:12]:  # limit requests
+        try:
+            r = requests.get(base_url + path, **req_kw)
+            if r.status_code < 400:
+                exposed_paths.append(path)
+        except Exception:
+            pass
+    if exposed_paths:
+        findings.append(Finding(
+            severity=Severity.MEDIUM,
+            title="OWASP A01: Accessible admin/API paths",
+            description=f"The following paths returned non-error responses: {', '.join(exposed_paths)}",
+            module="checks/http",
+            remediation="Restrict access to administrative and API endpoints via authentication and network controls.",
+            port=port, service="http",
+        ))
+
+    # ── A02: Cryptographic Failures ─────────────────────────────────
+
+    cookies = initial_resp.headers.get("Set-Cookie", "")
+    if cookies:
+        if is_https and "secure" not in cookies.lower():
+            findings.append(Finding(
+                severity=Severity.MEDIUM,
+                title="OWASP A02: Cookie missing Secure flag",
+                description="Set-Cookie header on HTTPS lacks the Secure flag.",
+                module="checks/http",
+                remediation="Add the Secure flag to all cookies served over HTTPS.",
+                port=port, service="http",
+            ))
+        if "httponly" not in cookies.lower():
+            findings.append(Finding(
+                severity=Severity.LOW,
+                title="OWASP A02: Cookie missing HttpOnly flag",
+                description="Set-Cookie header lacks the HttpOnly flag, making cookies accessible to JavaScript.",
+                module="checks/http",
+                remediation="Add the HttpOnly flag to session cookies.",
+                port=port, service="http",
+            ))
+
+    # ── A03: Injection — error message disclosure ───────────────────
+
+    error_patterns = [
+        "SQL syntax", "mysql_", "pg_query", "ORA-", "Microsoft OLE DB",
+        "Traceback (most recent call last)", "Exception in thread",
+        "Parse error", "Fatal error", "Warning:", "stack trace",
+    ]
+    for pat in error_patterns:
+        if pat.lower() in body.lower():
+            findings.append(Finding(
+                severity=Severity.MEDIUM,
+                title="OWASP A03: Error message / stack trace disclosure",
+                description=f"Response body contains error pattern: '{pat}'",
+                module="checks/http",
+                remediation="Configure custom error pages; never expose stack traces or database errors to users.",
+                port=port, service="http",
+            ))
+            break
+
+    # Reflected input canary
+    canary = f"netseccanary{uuid.uuid4().hex[:8]}"
+    try:
+        r = requests.get(f"{base_url}/?q={canary}", **req_kw)
+        if canary in r.text:
+            findings.append(Finding(
+                severity=Severity.LOW,
+                title="OWASP A03: Input reflected in response",
+                description="A unique canary string sent as a query parameter was reflected in the response body.",
+                module="checks/http",
+                remediation="Sanitize and encode all user input before including it in responses.",
+                port=port, service="http",
+            ))
+    except Exception:
+        pass
+
+    # ── A04: Insecure Design ────────────────────────────────────────
+
+    # OPTIONS method enumeration
+    try:
+        r = requests.options(base_url, **req_kw)
+        allow = r.headers.get("Allow", "")
+        risky = [m for m in ["PUT", "DELETE", "TRACE"] if m in allow.upper()]
+        if risky:
+            findings.append(Finding(
+                severity=Severity.MEDIUM,
+                title=f"OWASP A04: Risky HTTP methods enabled ({', '.join(risky)})",
+                description=f"OPTIONS response reveals enabled methods: {allow}",
+                module="checks/http",
+                remediation="Disable unnecessary HTTP methods (PUT, DELETE, TRACE).",
+                port=port, service="http",
+            ))
+    except Exception:
+        pass
+
+    # TRACE enabled
+    try:
+        r = requests.request("TRACE", base_url, **req_kw)
+        if r.status_code == 200 and "TRACE" in r.text[:500].upper():
+            findings.append(Finding(
+                severity=Severity.MEDIUM,
+                title="OWASP A04: TRACE method enabled",
+                description="The server responds to TRACE requests, which can enable Cross-Site Tracing (XST).",
+                module="checks/http",
+                remediation="Disable the TRACE HTTP method.",
+                port=port, service="http",
+            ))
+    except Exception:
+        pass
+
+    # ── A05: Security Misconfiguration ──────────────────────────────
+
+    # Sensitive file exposure
+    sensitive = owasp.get("sensitive_files", [])
+    exposed_files = []
+    for path in sensitive[:8]:  # limit requests
+        try:
+            r = requests.get(base_url + path, timeout=10, verify=False,
+                             headers=hdrs, allow_redirects=False)
+            if r.status_code == 200 and len(r.text) > 5:
+                exposed_files.append(path)
+        except Exception:
+            pass
+    if exposed_files:
+        findings.append(Finding(
+            severity=Severity.HIGH,
+            title="OWASP A05: Sensitive files exposed",
+            description=f"The following sensitive files are publicly accessible: {', '.join(exposed_files)}",
+            module="checks/http",
+            remediation="Block access to sensitive files via web server configuration.",
+            port=port, service="http",
+        ))
+
+    # Debug indicators
+    debug_indicators = []
+    if "X-Debug" in resp_headers or "X-Debug-Token" in resp_headers:
+        debug_indicators.append("X-Debug header present")
+    debug_body_patterns = ["Django", "Debugger", "FLASK_DEBUG", "WEB_DEBUG", "Whoops!"]
+    for pat in debug_body_patterns:
+        if pat.lower() in body.lower():
+            debug_indicators.append(f"'{pat}' found in response")
+            break
+    if debug_indicators:
+        findings.append(Finding(
+            severity=Severity.HIGH,
+            title="OWASP A05: Debug mode indicators detected",
+            description=f"Debug indicators found: {'; '.join(debug_indicators)}",
+            module="checks/http",
+            remediation="Disable debug mode in production environments.",
+            port=port, service="http",
+        ))
+
+    # ── A06: Vulnerable & Outdated Components ──────────────────────
+
+    # CMS detection from body
+    cms_patterns = [
+        (r'<meta[^>]+generator[^>]+WordPress\s*([\d.]+)', "WordPress"),
+        (r'<meta[^>]+generator[^>]+Drupal\s*([\d.]+)', "Drupal"),
+        (r'<meta[^>]+generator[^>]+Joomla[^\d]*([\d.]+)', "Joomla"),
+    ]
+    for pattern, cms_name in cms_patterns:
+        m = re.search(pattern, body, re.I)
+        if m:
+            ver = m.group(1)
+            findings.append(Finding(
+                severity=Severity.LOW,
+                title=f"OWASP A06: {cms_name} version detected ({ver})",
+                description=f"{cms_name} {ver} detected via meta generator tag.",
+                module="checks/http",
+                remediation=f"Keep {cms_name} updated and remove version info from HTML.",
+                port=port, service="http",
+            ))
+            break
+
+    # ── A07: Identification & Authentication Failures ──────────────
+
+    login_indicators = ["login", "log in", "sign in", "username", "password"]
+    has_login = any(kw in body.lower() for kw in login_indicators)
+    if has_login:
+        if not is_https:
+            findings.append(Finding(
+                severity=Severity.HIGH,
+                title="OWASP A07: Login form over unencrypted HTTP",
+                description="A login form was detected on a page served over HTTP (no TLS).",
+                module="checks/http",
+                remediation="Serve login pages exclusively over HTTPS.",
+                port=port, service="http",
+            ))
+        else:
+            findings.append(Finding(
+                severity=Severity.INFO,
+                title="OWASP A07: Login form detected",
+                description="A login form was detected. Verify it is protected against brute force and enumeration.",
+                module="checks/http",
+                port=port, service="http",
+            ))
+
+    # ── A08: Software & Data Integrity ─────────────────────────────
+
+    # SRI check on external scripts
+    try:
+        parser = _ScriptSrcParser()
+        parser.feed(body)
+        if parser.scripts_missing_sri:
+            scripts_sample = parser.scripts_missing_sri[:5]
+            findings.append(Finding(
+                severity=Severity.LOW,
+                title="OWASP A08: External scripts without Subresource Integrity",
+                description=f"{len(parser.scripts_missing_sri)} external script(s) lack SRI: {', '.join(scripts_sample)}",
+                module="checks/http",
+                remediation="Add integrity attributes to external script tags for Subresource Integrity.",
+                port=port, service="http",
             ))
     except Exception:
         pass
