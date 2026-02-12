@@ -1,0 +1,265 @@
+"""Report generation: Markdown, HTML, JSON."""
+
+import json
+import datetime
+from typing import List
+
+from jinja2 import Template
+
+from netsec_scanner import HostResult, Severity, SEVERITY_ORDER, __version__
+
+
+def generate_report(results: List[HostResult], target: str, fmt: str = "md") -> str:
+    if fmt == "json":
+        return _json_report(results, target)
+    elif fmt == "html":
+        return _html_report(results, target)
+    else:
+        return _md_report(results, target)
+
+
+def _serialize_results(results: List[HostResult], target: str) -> dict:
+    now = datetime.datetime.now().isoformat()
+    return {
+        "scan_target": target,
+        "scan_date": now,
+        "scanner_version": __version__,
+        "hosts": [
+            {
+                "ip": h.ip,
+                "hostname": h.hostname,
+                "os_guess": h.os_guess,
+                "risk_score": h.risk_score.value,
+                "ports": h.ports,
+                "finding_counts": h.finding_counts,
+                "findings": [
+                    {
+                        "severity": f.severity.value,
+                        "title": f.title,
+                        "description": f.description,
+                        "module": f.module,
+                        "remediation": f.remediation,
+                        "cve": f.cve,
+                        "port": f.port,
+                        "service": f.service,
+                        "details": f.details,
+                    }
+                    for f in sorted(h.findings, key=lambda x: SEVERITY_ORDER[x.severity])
+                ],
+            }
+            for h in results
+        ],
+    }
+
+
+def _json_report(results, target):
+    return json.dumps(_serialize_results(results, target), indent=2)
+
+
+def _md_report(results, target):
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    total_findings = sum(len(h.findings) for h in results)
+    counts = {s.value: 0 for s in Severity}
+    for h in results:
+        for f in h.findings:
+            counts[f.severity.value] += 1
+
+    lines = [
+        f"# Network Security Assessment Report",
+        f"",
+        f"**Target:** {target}  ",
+        f"**Date:** {now}  ",
+        f"**Scanner:** netsec-scanner v{__version__}  ",
+        f"**Hosts Scanned:** {len(results)}  ",
+        f"",
+        f"---",
+        f"",
+        f"## Executive Summary",
+        f"",
+        f"| Severity | Count |",
+        f"|----------|-------|",
+    ]
+    for s in Severity:
+        lines.append(f"| {s.value} | {counts[s.value]} |")
+    lines.append(f"| **TOTAL** | **{total_findings}** |")
+    lines.append("")
+
+    for h in results:
+        lines.append(f"---")
+        lines.append(f"")
+        header = f"## {h.ip}"
+        if h.hostname:
+            header += f" ({h.hostname})"
+        lines.append(header)
+        lines.append(f"")
+        lines.append(f"**Risk Level:** {h.risk_score.value}  ")
+        if h.os_guess:
+            lines.append(f"**OS:** {h.os_guess}  ")
+        lines.append("")
+
+        if h.ports:
+            lines.append("### Open Ports")
+            lines.append("")
+            lines.append("| Port | Protocol | Service | Version |")
+            lines.append("|------|----------|---------|---------|")
+            for p in h.ports:
+                lines.append(f"| {p.get('port','')} | {p.get('protocol','tcp')} | {p.get('service','')} | {p.get('version','')} |")
+            lines.append("")
+
+        if h.findings:
+            lines.append("### Findings")
+            lines.append("")
+            sorted_f = sorted(h.findings, key=lambda x: SEVERITY_ORDER[x.severity])
+            for f in sorted_f:
+                lines.append(f"#### [{f.severity.value}] {f.title}")
+                if f.cve:
+                    lines.append(f"**CVE:** {f.cve}  ")
+                if f.port:
+                    lines.append(f"**Port:** {f.port}  ")
+                lines.append(f"")
+                lines.append(f"{f.description}")
+                if f.remediation:
+                    lines.append(f"")
+                    lines.append(f"**Remediation:** {f.remediation}")
+                lines.append("")
+
+    # Remediation priority
+    all_findings = []
+    for h in results:
+        for f in h.findings:
+            all_findings.append((h.ip, f))
+    all_findings.sort(key=lambda x: SEVERITY_ORDER[x[1].severity])
+
+    if all_findings:
+        lines.append("---")
+        lines.append("")
+        lines.append("## Remediation Priority")
+        lines.append("")
+        lines.append("| # | Severity | Host | Finding | Remediation |")
+        lines.append("|---|----------|------|---------|-------------|")
+        for i, (ip, f) in enumerate(all_findings, 1):
+            lines.append(f"| {i} | {f.severity.value} | {ip} | {f.title} | {f.remediation} |")
+        lines.append("")
+
+    lines.append("---")
+    lines.append(f"*Generated by netsec-scanner v{__version__}*")
+    return "\n".join(lines)
+
+
+HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Network Security Assessment — {{ target }}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; line-height: 1.6; }
+.header { background: #1a1a2e; color: #fff; padding: 2rem; }
+.header h1 { font-size: 1.8rem; }
+.header .meta { color: #aaa; margin-top: 0.5rem; }
+.container { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+.summary-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1rem; margin: 1.5rem 0; }
+.summary-card { padding: 1rem; border-radius: 8px; text-align: center; color: #fff; }
+.summary-card .count { font-size: 2rem; font-weight: bold; }
+.summary-card .label { font-size: 0.8rem; text-transform: uppercase; }
+.sev-CRITICAL { background: #dc2626; }
+.sev-HIGH { background: #ea580c; }
+.sev-MEDIUM { background: #ca8a04; }
+.sev-LOW { background: #2563eb; }
+.sev-INFO { background: #6b7280; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; color: #fff; font-size: 0.75rem; font-weight: 600; }
+.host-card { background: #fff; border-radius: 8px; margin: 1.5rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
+.host-header { padding: 1rem 1.5rem; border-left: 4px solid; }
+.host-header h2 { font-size: 1.2rem; }
+.host-body { padding: 1.5rem; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #e5e7eb; }
+th { background: #f9fafb; font-weight: 600; font-size: 0.85rem; }
+.finding { margin: 1rem 0; padding: 1rem; border-radius: 6px; border-left: 4px solid; background: #fafafa; }
+.finding h3 { font-size: 1rem; margin-bottom: 0.5rem; }
+.finding p { font-size: 0.9rem; }
+.finding .remediation { color: #059669; margin-top: 0.5rem; font-size: 0.85rem; }
+.footer { text-align: center; padding: 2rem; color: #999; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🔒 Network Security Assessment Report</h1>
+  <div class="meta">Target: {{ target }} | Date: {{ date }} | Scanner: netsec-scanner v{{ version }}</div>
+</div>
+<div class="container">
+  <h2>Executive Summary</h2>
+  <div class="summary-grid">
+    {% for sev in severities %}
+    <div class="summary-card sev-{{ sev }}">
+      <div class="count">{{ counts[sev] }}</div>
+      <div class="label">{{ sev }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% for host in hosts %}
+  <div class="host-card">
+    <div class="host-header" style="border-color: var(--risk-color, #6b7280);">
+      <h2>{{ host.ip }}{% if host.hostname %} ({{ host.hostname }}){% endif %}
+        <span class="badge sev-{{ host.risk_score }}">{{ host.risk_score }} RISK</span>
+      </h2>
+      {% if host.os_guess %}<p style="color:#666;font-size:0.9rem;">OS: {{ host.os_guess }}</p>{% endif %}
+    </div>
+    <div class="host-body">
+      {% if host.ports %}
+      <table>
+        <tr><th>Port</th><th>Protocol</th><th>Service</th><th>Version</th></tr>
+        {% for p in host.ports %}
+        <tr><td>{{ p.port }}</td><td>{{ p.protocol }}</td><td>{{ p.service }}</td><td>{{ p.version }}</td></tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+
+      {% for f in host.findings %}
+      <div class="finding" style="border-color: var(--sev-color);">
+        <h3><span class="badge sev-{{ f.severity }}">{{ f.severity }}</span> {{ f.title }}</h3>
+        {% if f.cve %}<p><strong>CVE:</strong> {{ f.cve }}</p>{% endif %}
+        <p>{{ f.description }}</p>
+        {% if f.remediation %}<p class="remediation">💡 {{ f.remediation }}</p>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+<div class="footer">Generated by netsec-scanner v{{ version }}</div>
+</body>
+</html>
+"""
+
+
+def _html_report(results, target):
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    counts = {s.value: 0 for s in Severity}
+    for h in results:
+        for f in h.findings:
+            counts[f.severity.value] += 1
+
+    hosts_data = []
+    for h in results:
+        sorted_f = sorted(h.findings, key=lambda x: SEVERITY_ORDER[x.severity])
+        hosts_data.append({
+            "ip": h.ip,
+            "hostname": h.hostname,
+            "os_guess": h.os_guess,
+            "risk_score": h.risk_score.value,
+            "ports": [{"port": p.get("port",""), "protocol": p.get("protocol","tcp"), "service": p.get("service",""), "version": p.get("version","")} for p in h.ports],
+            "findings": [{"severity": f.severity.value, "title": f.title, "description": f.description, "cve": f.cve, "remediation": f.remediation} for f in sorted_f],
+        })
+
+    tmpl = Template(HTML_TEMPLATE)
+    return tmpl.render(
+        target=target,
+        date=now,
+        version=__version__,
+        severities=[s.value for s in Severity],
+        counts=counts,
+        hosts=hosts_data,
+    )

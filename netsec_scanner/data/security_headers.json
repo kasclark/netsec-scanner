@@ -1,0 +1,50 @@
+[
+  {
+    "header": "Strict-Transport-Security",
+    "description": "HSTS header is missing. Without it, browsers may allow HTTP connections, enabling man-in-the-middle attacks.",
+    "severity_if_missing": "HIGH",
+    "remediation": "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' header."
+  },
+  {
+    "header": "Content-Security-Policy",
+    "description": "CSP header is missing. Without it, the site is more vulnerable to XSS and data injection attacks.",
+    "severity_if_missing": "MEDIUM",
+    "remediation": "Implement a Content-Security-Policy header appropriate for your application."
+  },
+  {
+    "header": "X-Frame-Options",
+    "description": "X-Frame-Options header is missing. The page can be embedded in iframes, enabling clickjacking attacks.",
+    "severity_if_missing": "MEDIUM",
+    "remediation": "Add 'X-Frame-Options: DENY' or 'SAMEORIGIN' header."
+  },
+  {
+    "header": "X-Content-Type-Options",
+    "description": "X-Content-Type-Options header is missing. Browsers may MIME-sniff responses, leading to security issues.",
+    "severity_if_missing": "LOW",
+    "remediation": "Add 'X-Content-Type-Options: nosniff' header."
+  },
+  {
+    "header": "Referrer-Policy",
+    "description": "Referrer-Policy header is missing. The browser may leak URL information to third-party sites.",
+    "severity_if_missing": "LOW",
+    "remediation": "Add 'Referrer-Policy: strict-origin-when-cross-origin' header."
+  },
+  {
+    "header": "Permissions-Policy",
+    "description": "Permissions-Policy header is missing. Browser features like camera, microphone, and geolocation are not restricted.",
+    "severity_if_missing": "LOW",
+    "remediation": "Add a Permissions-Policy header to restrict browser feature access."
+  },
+  {
+    "header": "X-XSS-Protection",
+    "description": "X-XSS-Protection header is missing. While deprecated in modern browsers, it provides defense-in-depth for older browsers.",
+    "severity_if_missing": "LOW",
+    "remediation": "Add 'X-XSS-Protection: 1; mode=block' header (or rely on CSP in modern browsers)."
+  },
+  {
+    "header": "Cache-Control",
+    "description": "Cache-Control header is missing. Sensitive responses may be cached by browsers or proxies.",
+    "severity_if_missing": "LOW",
+    "remediation": "Add appropriate Cache-Control headers (e.g., 'no-store' for sensitive pages)."
+  }
+]
