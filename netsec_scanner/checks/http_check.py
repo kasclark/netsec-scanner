@@ -9,6 +9,7 @@ import datetime
 import uuid
 from typing import List
 from html.parser import HTMLParser
+from urllib.parse import urlparse
 
 import requests
 
@@ -54,8 +55,22 @@ def check_http(ip: str, port: int, port_info: dict) -> List[Finding]:
 
     # HTTP response checks
     try:
-        resp = requests.get(base_url, timeout=10, verify=False, allow_redirects=True,
+        resp = requests.get(base_url, timeout=10, verify=False, allow_redirects=False,
                            headers={"User-Agent": "netsec-scanner/1.0"})
+
+        location = resp.headers.get("Location", "")
+        if resp.is_redirect and location:
+            parsed = urlparse(location)
+            if parsed.netloc and parsed.hostname not in {ip, f"{ip}:{port}"}:
+                findings.append(Finding(
+                    severity=Severity.INFO,
+                    title="HTTP redirect leaves scan target",
+                    description=f"The service redirects to {location}. Redirects are not followed to keep scans in scope.",
+                    module="checks/http",
+                    remediation="Verify this redirect is intentional and points to an authorized destination.",
+                    port=port,
+                    service="http",
+                ))
 
         # Security headers
         headers_config = _load_security_headers()
@@ -154,6 +169,24 @@ def check_http(ip: str, port: int, port_info: dict) -> List[Finding]:
 def _check_tls(ip: str, port: int) -> List[Finding]:
     """Check TLS configuration."""
     findings = []
+
+    try:
+        trusted_ctx = ssl.create_default_context()
+        with socket.create_connection((ip, port), timeout=10) as sock:
+            with trusted_ctx.wrap_socket(sock, server_hostname=ip):
+                pass
+    except ssl.SSLCertVerificationError as e:
+        findings.append(Finding(
+            severity=Severity.MEDIUM,
+            title="TLS certificate validation failed",
+            description=f"Certificate validation failed: {getattr(e, 'verify_message', str(e))}",
+            module="checks/http",
+            remediation="Install a certificate trusted by clients and valid for the scanned hostname/IP.",
+            port=port,
+            service="https",
+        ))
+    except Exception:
+        pass
 
     try:
         ctx = ssl.create_default_context()
@@ -270,7 +303,7 @@ def _check_owasp(ip: str, port: int, base_url: str, is_https: bool, initial_resp
     """Run OWASP Top 10 passive/safe checks. Returns list of Findings."""
     findings = []
     hdrs = {"User-Agent": "netsec-scanner/1.0"}
-    req_kw = dict(timeout=10, verify=False, headers=hdrs, allow_redirects=True)
+    req_kw = dict(timeout=10, verify=False, headers=hdrs, allow_redirects=False)
     body = initial_resp.text[:10000]
     resp_headers = initial_resp.headers
     owasp = _load_owasp_paths()
@@ -297,7 +330,7 @@ def _check_owasp(ip: str, port: int, base_url: str, is_https: bool, initial_resp
     # CORS wildcard
     try:
         r = requests.get(base_url, timeout=10, verify=False,
-                         headers={**hdrs, "Origin": "https://evil.example.com"}, allow_redirects=True)
+                         headers={**hdrs, "Origin": "https://evil.example.com"}, allow_redirects=False)
         acao = r.headers.get("Access-Control-Allow-Origin", "")
         if acao == "*":
             findings.append(Finding(
