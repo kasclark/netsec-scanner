@@ -1,10 +1,10 @@
 """Main scan orchestrator."""
 
-import ipaddress
 import socket
 from typing import List, Callable, Optional
 
 from netsec_scanner import HostResult, Finding, Severity
+from netsec_scanner.validation import DEFAULT_MAX_HOSTS, normalize_ports, resolve_targets
 from netsec_scanner.discovery.port_scan import scan_ports
 from netsec_scanner.discovery.banner_grab import grab_banners
 from netsec_scanner.vulns.nvd_lookup import lookup_cves
@@ -47,40 +47,24 @@ SERVICE_CHECKS = {
 }
 
 
-def resolve_targets(target: str) -> List[str]:
-    """Resolve target string to list of IPs."""
-    try:
-        network = ipaddress.ip_network(target, strict=False)
-        if network.num_addresses > 1:
-            return [str(ip) for ip in network.hosts()]
-        return [str(network.network_address)]
-    except ValueError:
-        pass
-
-    # Hostname or single IP
-    try:
-        ip = socket.gethostbyname(target)
-        return [ip]
-    except socket.gaierror:
-        return [target]
-
-
 class NetworkScanner:
     def __init__(self, target: str, ports: str = "top-1000", deep: bool = False,
-                 modules: List[str] = None, timeout: int = 300, is_root: bool = False):
+                 modules: List[str] = None, timeout: int = 300, is_root: bool = False,
+                 max_hosts: int = DEFAULT_MAX_HOSTS):
         self.target = target
-        self.ports = ports
+        self.ports = normalize_ports(ports)
         self.deep = deep
         self.modules = modules or ["discovery", "vulns", "checks"]
         self.timeout = timeout
         self.is_root = is_root
+        self.max_hosts = max_hosts
 
     def run(self, progress_callback: Optional[Callable] = None) -> List[HostResult]:
         def update(pct, msg):
             if progress_callback:
                 progress_callback(pct, msg)
 
-        targets = resolve_targets(self.target)
+        targets = resolve_targets(self.target, self.max_hosts)
         results = []
         total = len(targets)
 

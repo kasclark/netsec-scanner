@@ -59,6 +59,13 @@ netsec-scanner scan 192.168.1.1 --i-own-this
 sudo netsec-scanner scan 192.168.1.0/24 --i-own-this
 ```
 
+Subnet scans are limited to 256 resolved hosts by default to prevent accidental
+large-scope scans. Raise the limit only for networks you are authorized to test:
+
+```bash
+sudo netsec-scanner scan 10.0.0.0/23 --max-hosts 512 --i-own-this
+```
+
 ### Deep Scan (All Ports + OS Detection)
 
 ```bash

@@ -2,9 +2,10 @@
 
 import json
 import datetime
+from html import escape as html_escape
 from typing import List
 
-from jinja2 import Template
+from jinja2 import Environment
 
 from netsec_scanner import HostResult, Severity, SEVERITY_ORDER, __version__
 
@@ -56,6 +57,16 @@ def _json_report(results, target):
     return json.dumps(_serialize_results(results, target), indent=2)
 
 
+def _md_escape(value, table_cell: bool = False) -> str:
+    """Escape untrusted scan output before embedding it in Markdown."""
+    text = "" if value is None else str(value)
+    text = html_escape(text, quote=False)
+    if table_cell:
+        text = text.replace("|", "\\|")
+        text = text.replace("\r", " ").replace("\n", "<br>")
+    return text
+
+
 def _md_report(results, target):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     total_findings = sum(len(h.findings) for h in results)
@@ -67,7 +78,7 @@ def _md_report(results, target):
     lines = [
         f"# Network Security Assessment Report",
         f"",
-        f"**Target:** {target}  ",
+        f"**Target:** {_md_escape(target)}  ",
         f"**Date:** {now}  ",
         f"**Scanner:** netsec-scanner v{__version__}  ",
         f"**Hosts Scanned:** {len(results)}  ",
@@ -87,14 +98,14 @@ def _md_report(results, target):
     for h in results:
         lines.append(f"---")
         lines.append(f"")
-        header = f"## {h.ip}"
+        header = f"## {_md_escape(h.ip)}"
         if h.hostname:
-            header += f" ({h.hostname})"
+            header += f" ({_md_escape(h.hostname)})"
         lines.append(header)
         lines.append(f"")
         lines.append(f"**Risk Level:** {h.risk_score.value}  ")
         if h.os_guess:
-            lines.append(f"**OS:** {h.os_guess}  ")
+            lines.append(f"**OS:** {_md_escape(h.os_guess)}  ")
         lines.append("")
 
         if h.ports:
@@ -103,7 +114,12 @@ def _md_report(results, target):
             lines.append("| Port | Protocol | Service | Version |")
             lines.append("|------|----------|---------|---------|")
             for p in h.ports:
-                lines.append(f"| {p.get('port','')} | {p.get('protocol','tcp')} | {p.get('service','')} | {p.get('version','')} |")
+                lines.append(
+                    f"| {_md_escape(p.get('port',''), True)} "
+                    f"| {_md_escape(p.get('protocol','tcp'), True)} "
+                    f"| {_md_escape(p.get('service',''), True)} "
+                    f"| {_md_escape(p.get('version',''), True)} |"
+                )
             lines.append("")
 
         if h.findings:
@@ -111,16 +127,16 @@ def _md_report(results, target):
             lines.append("")
             sorted_f = sorted(h.findings, key=lambda x: SEVERITY_ORDER[x.severity])
             for f in sorted_f:
-                lines.append(f"#### [{f.severity.value}] {f.title}")
+                lines.append(f"#### [{f.severity.value}] {_md_escape(f.title)}")
                 if f.cve:
-                    lines.append(f"**CVE:** {f.cve}  ")
+                    lines.append(f"**CVE:** {_md_escape(f.cve)}  ")
                 if f.port:
-                    lines.append(f"**Port:** {f.port}  ")
+                    lines.append(f"**Port:** {_md_escape(f.port)}  ")
                 lines.append(f"")
-                lines.append(f"{f.description}")
+                lines.append(f"{_md_escape(f.description)}")
                 if f.remediation:
                     lines.append(f"")
-                    lines.append(f"**Remediation:** {f.remediation}")
+                    lines.append(f"**Remediation:** {_md_escape(f.remediation)}")
                 lines.append("")
 
     # Remediation priority
@@ -138,7 +154,10 @@ def _md_report(results, target):
         lines.append("| # | Severity | Host | Finding | Remediation |")
         lines.append("|---|----------|------|---------|-------------|")
         for i, (ip, f) in enumerate(all_findings, 1):
-            lines.append(f"| {i} | {f.severity.value} | {ip} | {f.title} | {f.remediation} |")
+            lines.append(
+                f"| {i} | {f.severity.value} | {_md_escape(ip, True)} "
+                f"| {_md_escape(f.title, True)} | {_md_escape(f.remediation, True)} |"
+            )
         lines.append("")
 
     lines.append("---")
@@ -254,7 +273,8 @@ def _html_report(results, target):
             "findings": [{"severity": f.severity.value, "title": f.title, "description": f.description, "cve": f.cve, "remediation": f.remediation} for f in sorted_f],
         })
 
-    tmpl = Template(HTML_TEMPLATE)
+    env = Environment(autoescape=True)
+    tmpl = env.from_string(HTML_TEMPLATE)
     return tmpl.render(
         target=target,
         date=now,

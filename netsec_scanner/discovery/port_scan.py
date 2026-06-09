@@ -3,6 +3,8 @@
 import shutil
 from typing import List, Tuple
 
+from netsec_scanner.validation import normalize_ports
+
 try:
     import nmap
 except ImportError:
@@ -12,6 +14,8 @@ except ImportError:
 def scan_ports(ip: str, ports: str = "top-1000", deep: bool = False,
                is_root: bool = False, timeout: int = 300) -> Tuple[List[dict], str]:
     """Run nmap scan. Returns (list of port dicts, os_guess string)."""
+    ports = normalize_ports(ports)
+
     if nmap is None or not shutil.which("nmap"):
         return [], ""
 

@@ -1,5 +1,6 @@
 """CLI interface for netsec-scanner."""
 
+import ctypes
 import os
 import sys
 import click
@@ -12,6 +13,7 @@ from rich.text import Text
 from netsec_scanner import __version__, Severity, SEVERITY_ORDER
 from netsec_scanner.scanner import NetworkScanner
 from netsec_scanner.report import generate_report
+from netsec_scanner.validation import DEFAULT_MAX_HOSTS, normalize_ports
 
 console = Console()
 
@@ -39,6 +41,18 @@ def print_banner():
     console.print()
 
 
+def _running_as_root() -> bool:
+    """Return whether the process has elevated privileges on this platform."""
+    if hasattr(os, "geteuid"):
+        return os.geteuid() == 0
+    if os.name == "nt":
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    return False
+
+
 @click.group()
 @click.version_option(version=__version__)
 def cli():
@@ -53,9 +67,11 @@ def cli():
 @click.option("--modules", default="all", help="Comma-separated modules: discovery,vulns,checks (default: all)")
 @click.option("--format", "fmt", type=click.Choice(["md", "html", "json"]), default=None, help="Report format")
 @click.option("-o", "--output", default=None, help="Output file path")
-@click.option("--timeout", default=300, type=int, help="Per-host timeout in seconds")
+@click.option("--timeout", default=300, type=click.IntRange(1, 3600), help="Per-host timeout in seconds")
+@click.option("--max-hosts", default=DEFAULT_MAX_HOSTS, type=click.IntRange(1, 4096),
+              help="Maximum hosts to scan after CIDR expansion")
 @click.option("--i-own-this", is_flag=True, help="Acknowledge you have permission to scan the target")
-def scan(target, ports, deep, modules, fmt, output, timeout, i_own_this):
+def scan(target, ports, deep, modules, fmt, output, timeout, max_hosts, i_own_this):
     """Scan a target (IP, hostname, or CIDR) for security issues."""
     print_banner()
 
@@ -68,7 +84,12 @@ def scan(target, ports, deep, modules, fmt, output, timeout, i_own_this):
             sys.exit(1)
         console.print()
 
-    is_root = os.geteuid() == 0
+    try:
+        ports = normalize_ports("all" if deep else ports)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    is_root = _running_as_root()
     if not is_root:
         console.print("[yellow]⚠  Not running as root — SYN scan unavailable, falling back to connect scan.[/yellow]")
         console.print("[dim]  Run with sudo for SYN scanning and OS detection.[/dim]\n")
@@ -85,6 +106,7 @@ def scan(target, ports, deep, modules, fmt, output, timeout, i_own_this):
         modules=module_list,
         timeout=timeout,
         is_root=is_root,
+        max_hosts=max_hosts,
     )
 
     with Progress(
